@@ -35,19 +35,15 @@ install: $(NAME)
 rpm:
 	if [ `id -u` = 0 ]; then \
 		redhat/rules binary; \
-		redhat/rules clean; \
 	else \
 		fakeroot redhat/rules binary; \
-		fakeroot redhat/rules clean; \
 	fi
 
 deb:
 	if [ `id -u` = 0 ]; then \
 		debian/rules binary; \
-		debian/rules clean; \
 	else \
 		fakeroot debian/rules binary; \
-		fakeroot debian/rules clean; \
 	fi
 
 tgz:
@@ -63,9 +59,6 @@ uninstall:
 
 clean:
 	rm -f *.o tags cntlm pid massif* callgrind* 2>/dev/null
-
-cleanp:
-	rm -f *.deb *.tgz *.tar.gz *.rpm *.o tags cntlm pid massif* callgrind* 2>/dev/null
 
 distclean: clean
 	if [ `id -u` = 0 ]; then \
