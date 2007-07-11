@@ -77,8 +77,6 @@ static int hashlm = 1;
 
 static int quit = 0;			/* sighandler() */
 static int debug = 0;			/* all info printf's */
-static int daemon = 1;			/* myexit() */
-static int basic = 0;			/* process() */
 
 /*
  * List of finished threads. Each thread process() adds itself to it when
@@ -121,13 +119,6 @@ void sighandler(int p) {
 		syslog(LOG_INFO, "Signal %d received, forcing shutdown\n", p);
 
 	quit++;
-}
-
-void myexit(int rc) {
-	if (rc)
-		fprintf(stderr, "Exitting with error. Check daemon logs or run with -v.\n");
-	
-	exit(rc);
 }
 
 /*
@@ -510,7 +501,6 @@ int chunked_data_send(int dst, int src) {
 	bsize = BUFSIZE;
 	buf = new(bsize);
 
-	/* Take care of all chunks */
 	do {
 		i = so_recvln(src, &buf, &bsize);
 		if (i <= 0) {
@@ -518,25 +508,10 @@ int chunked_data_send(int dst, int src) {
 			break;
 		}
 
-		if (debug)
-			printf("Line: %s\n", buf);
-
-		/*
-		printf("*buf = ");
-		for (i = 0; i < 100; i++) {
-			printf("%02x ", buf[i]);
-			if (i % 8 == 7)
-				printf("\n       ");
-		}
-		printf("\n");
-		*/
-
+		/* printf("Line: %s\n", buf); */
 		csize = strtol(buf, &err, 16);
-
-		if (debug)
-			printf("strtol: %d (%x) - err: %s\n", csize, csize, err);
-
-		if (*err != '\r' && *err != '\n' && *err != ';' && *err != ' ' && *err != '\t') {
+		/* printf("strtol: %d (%x) - err: %s\n", csize, csize, err); */
+		if (*err != '\r') {
 			err = NULL;
 			break;
 		}
@@ -551,17 +526,12 @@ int chunked_data_send(int dst, int src) {
 
 		write(dst, buf, strlen(buf));
 		if (csize)
-			data_send(dst, src, csize+2);
+			data_send(dst, src, csize);
+
+		i = read(src, buf, 2);
+		write(dst, buf, i);
 
 	} while (csize != 0);
-
-	/* Take care of possible trailer */
-	do {
-		i = so_recvln(src, &buf, &bsize);
-		if (debug)
-			printf("Trailer header: %s", buf);
-		write(dst, buf, strlen(buf));
-	} while (buf[0] != '\r' && buf[0] != '\n');
 
 	free(buf);
 
@@ -636,10 +606,10 @@ int tunnel(int cd, int sd) {
  * NTLM auth message and insert it into the original client header,
  * which is then normally proessed back in process().
  */
-int authenticate(int sd, rr_data_t data, char *user, char *password, char *domain) {
+int authenticate(int sd, rr_data_t data) {
 	char *tmp, *buf, *challenge;
 	rr_data_t auth;
-	int len, rc;
+	int len;
 
 	buf = new(BUFSIZE);
 
@@ -667,8 +637,9 @@ int authenticate(int sd, rr_data_t data, char *user, char *password, char *domai
 	}
 
 	if (!headers_send(sd, auth)) {
-		rc = 0;
-		goto bailout;
+		free_rr_data(auth);
+		free(buf);
+		return 0;
 	}
 
 	free_rr_data(auth);
@@ -678,9 +649,14 @@ int authenticate(int sd, rr_data_t data, char *user, char *password, char *domai
 		printf("Reading auth response...\n");
 
 	if (!headers_recv(sd, auth)) {
-		rc = 0;
-		goto bailout;
+		free_rr_data(auth);
+		free(buf);
+		return 0;
 	}
+
+	if (debug)
+		hlist_dump(auth->headers);
+
 	/*
 	tmp = hlist_get(auth->headers, "Content-Length");
 	if (tmp && (len = atoi(tmp))) {
@@ -709,31 +685,16 @@ int authenticate(int sd, rr_data_t data, char *user, char *password, char *domai
 		if (debug)
 			printf("REQUEST DENIED\n\n");
 
-		rc = 500;
-		goto bailout;
+		free_rr_data(auth);
+		free(buf);
+
+		return 500;
 	}
 
-	rc = 1;
-
-bailout:
 	free_rr_data(auth);
 	free(buf);
 
-	return rc;
-}
-
-char *gen_denied_page(char *http) {
-	char *tmp;
-
-	tmp = new(BUFSIZE);
-	snprintf(tmp, BUFSIZE, "HTTP/1.%s 407 Access denied.\r\n", http);
-	strcat(tmp, "Proxy-Authenticate: Basic realm=\"Cntlm Proxy\"\r\n");
-	strcat(tmp, "Content-Type: text/html\r\n\r\n");
-	strcat(tmp, "<html><body><h1>Authentication error</h1><p><a href='http://cntlm.sf.net/'>Cntlm</a> "
-		"proxy has NTLM-to-basic feature enabled. You have to enter correct credentials to continue "
-		"(try Ctrl-R or F5).</p></body></html>");
-
-	return tmp;
+	return 1;
 }
 
 /*
@@ -748,8 +709,7 @@ void *process(void *client) {
 	int i, loop, nobody, keep, chunked;
 	rr_data_t data[2];
 	hlist_t tl;
-	char *tmp, *buf, *pos, *dom;
-	char *puser, *ppass, *pdomain;				/* Per-thread credentials; for NTLM-to-basic */
+	char *tmp;
 
 	int cd = (int)client;
 	int authok = 0;
@@ -773,22 +733,11 @@ void *process(void *client) {
 	if (!sd)
 		sd = proxy_connect();
 
-	puser = new(AUTHSIZE);
-	ppass = new(AUTHSIZE);
-	pdomain = new(AUTHSIZE);
-
-	strlcpy(pdomain, domain, AUTHSIZE);
-	if (!basic) {
-		strlcpy(puser, user, AUTHSIZE);
-		strlcpy(ppass, password, AUTHSIZE);
-	}
-
 	if (sd <= 0)
 		goto bailout;
 
 	do {
-		/*
-		 * data[0] is for the first loop pass
+		/* data[0] is for the first loop pass
 		 *   - we read the request headers from the client
 		 *   - if not already done, we try to authenticate the connection
 		 *   - we send the request headers to the proxy with HTTP body, if present
@@ -807,7 +756,7 @@ void *process(void *client) {
 
 		for (loop = 0; loop < 2; loop++) {
 			if (debug) {
-				printf("\n******* Round %d C: %d, S: %d *******!\n", loop+1, cd, sd);
+				printf("\n******* Round %d C: %d, S: %d*******!\n", loop+1, cd, sd);
 				printf("Reading headers...\n");
 			}
 			if (!headers_recv(*rsocket[loop], data[loop])) {
@@ -821,68 +770,6 @@ void *process(void *client) {
 
 			if (debug)
 				hlist_dump(data[loop]->headers);
-
-			/*
-			 * NTLM-to-Basic implementation
-			 */
-			if (!loop && basic) {
-				tmp = hlist_get(data[loop]->headers, "Proxy-Authorization");
-				pos = NULL;
-				buf = NULL;
-
-				if (tmp) {
-					buf = new(strlen(tmp));
-					i = 5;
-					while (tmp[++i] == ' ');
-					from_base64(buf, tmp+i);
-					if (debug)
-						printf("NTLM-to-basic: Received client credentials.\n");
-					pos = strchr(buf, ':');
-				}
-
-				if (pos == NULL) {
-					if (debug && tmp != NULL)
-						printf("NTLM-to-basic: Could not parse given credentials.\n");
-					if (debug)
-						printf("NTLM-to-basic: Sending the client auth request.\n");
-
-					tmp = gen_denied_page(data[loop]->http);
-					write(cd, tmp, strlen(tmp));
-					free(tmp);
-
-					if (buf)
-						free(buf);
-
-					close(sd);
-					free_rr_data(data[0]);
-					free_rr_data(data[1]);
-					goto bailout;
-				} else {
-					dom = strchr(buf, '\\');
-					if (dom == NULL) {
-						strlcpy(puser, buf, MIN(AUTHSIZE, pos-buf+1));
-					} else {
-						strlcpy(pdomain, buf, MIN(AUTHSIZE, dom-buf+1));
-						strlcpy(puser, dom+1, MIN(AUTHSIZE, pos-dom));
-					}
-					strlcpy(ppass, pos+1, AUTHSIZE);
-					if (debug)
-						printf("NTLM-to-basic: Credentials parsed: %s\\%s:%s at %s\n", pdomain, puser, ppass, workstation);
-					free(buf);
-				}
-			} else if (loop && basic && data[loop]->code == 407) {
-				if (debug)
-					printf("NTLM-to-basic: Given credentials failed for proxy access.\n");
-
-				tmp = gen_denied_page(data[loop]->http);
-				write(cd, tmp, strlen(tmp));
-				free(tmp);
-
-				close(sd);
-				free_rr_data(data[0]);
-				free_rr_data(data[1]);
-				goto bailout;
-			}
 
 			/*
 			 * Try to request keep-alive for every connection, but first remember if client
@@ -911,14 +798,14 @@ void *process(void *client) {
 					tl = tl->next;
 				}
 				data[loop]->headers = hlist_mod(data[loop]->headers, "Proxy-Connection", "Keep-Alive", 1);
-				data[loop]->headers = hlist_mod(data[loop]->headers, "Connection", "Keep-Alive", 1);
+
 			}
 
 			/*
 			 * Got request from client and connection is not yet authenticated?
 			 */
 			if (!loop && data[0]->req && !authok) {
-				if (!(i = authenticate(*wsocket[0], data[0], puser, ppass, pdomain)))
+				if (!(i = authenticate(*wsocket[0], data[0])))
 					syslog(LOG_ERR, "Authentication requests failed. Will try without.\n");
 
 				if (!i || so_closed(sd)) {
@@ -1025,7 +912,6 @@ void *process(void *client) {
 						lowercase(tmp);
 						if (strstr(tmp, "chunked"))
 							chunked = 1;
-						free(tmp);
 					}
 
 					if (chunked) {
@@ -1067,10 +953,6 @@ void *process(void *client) {
 	} while (!so_closed(sd) && !so_closed(cd) && (keep || so_dataready(cd)));
 
 bailout:
-	free(puser);
-	free(ppass);
-	free(pdomain);
-
 	if (debug)
 		printf("\nThread finished.\n");
 
@@ -1132,7 +1014,7 @@ void *autotunnel(void *client) {
 	if (debug)
 		printf("Starting authentication...\n");
 
-	i = authenticate(sd, data1, user, password, domain);
+	i = authenticate(sd, data1);
 	if (i && i != 500) {
 		if (so_closed(sd)) {
 			close(sd);
@@ -1200,7 +1082,7 @@ void proxy_add(plist_t *list, char *spec, int gateway) {
 		tmp = substr(spec, 0, p);
 		if (!so_resolv(&source, tmp)) {
 			syslog(LOG_ERR, "Cannot resolve listen address %s\n", tmp);
-			myexit(1);
+			exit(1);
 		}
 		free(tmp);
 		port = atoi(tmp = spec+p+1);
@@ -1211,7 +1093,7 @@ void proxy_add(plist_t *list, char *spec, int gateway) {
 
 	if (port == 0) {
 		syslog(LOG_ERR, "Invalid listen port %s.\n", tmp);
-		myexit(1);
+		exit(1);
 	}
 
 	i = so_listen(port, source);
@@ -1229,11 +1111,6 @@ void tunnel_add(plist_t *list, char *spec, int gateway) {
 	char *field[4];
 	char *tmp;
 
-	if (!strlen(user) || !strlen(password)) {
-		syslog(LOG_ERR, "Cannot build tunnel when no global username/password defined\n");
-		myexit(1);
-	}
-
 	spec = strdupl(spec);
 	len = strlen(spec);
 	field[0] = spec;
@@ -1247,7 +1124,7 @@ void tunnel_add(plist_t *list, char *spec, int gateway) {
 	if (count == 4) {
 		if (!so_resolv(&source, field[pos])) {
                         syslog(LOG_ERR, "Cannot resolve tunel listen address: %s\n", field[pos]);
-                        myexit(1);
+                        exit(1);
                 }
 		pos++;
 	} else
@@ -1257,12 +1134,12 @@ void tunnel_add(plist_t *list, char *spec, int gateway) {
 		port = atoi(field[pos]);
 		if (port == 0) {
 			syslog(LOG_ERR, "Invalid tunnel local port: %s\n", field[pos]);
-			myexit(1);
+			exit(1);
 		}
 
 		if (!strlen(field[pos+1]) || !strlen(field[pos+2])) {
 			syslog(LOG_ERR, "Invalid tunnel target: %s:%s\n", field[pos+1], field[pos+2]);
-			myexit(1);
+			exit(1);
 		}
 
 		tmp = new(strlen(field[pos+1]) + strlen(field[pos+2]) + 2 + 1);
@@ -1278,7 +1155,7 @@ void tunnel_add(plist_t *list, char *spec, int gateway) {
 			free(tmp);
 	} else {
 		printf("Tunnel specification incorrect ([laddress:]lport:rserver:rport).\n");
-		myexit(1);
+		exit(1);
 	}
 
 	free(spec);
@@ -1294,6 +1171,7 @@ int main(int argc, char **argv) {
 	int help = 0;
 	int nuid = 0;
 	int ngid = 0;
+	int daemon = 1;
 	int gateway = 0;
 	int tc = 0;
 	int tj = 0;
@@ -1313,18 +1191,15 @@ int main(int argc, char **argv) {
 	openlog("cntlm", LOG_CONS, LOG_DAEMON);
 	syslog(LOG_INFO, "Starting cntlm version " VERSION);
 
-	while ((i = getopt(argc, argv, ":-:a:c:d:fgl:p:u:vw:A:BD:L:P:U:")) != -1) {
+	while ((i = getopt(argc, argv, ":a:c:d:fgl:p:u:vw:A:D:L:P:U:")) != -1) {
 		switch (i) {
 			case 'a':
 				strlcpy(auth, optarg, AUTHSIZE);
 				break;
-			case 'B':
-				basic = 1;
-				break;
 			case 'c':
 				if (!(cf = config_open(optarg))) {
 					syslog(LOG_ERR, "Cannot access specified config file: %s\n", optarg);
-					myexit(1);
+					exit(1);
 				}
 				break;
 			case 'd':
@@ -1370,7 +1245,7 @@ int main(int argc, char **argv) {
 			case 'A':
 			case 'D':
 				if (!acl_add(&rules, optarg, (i == 'A' ? ACL_ALLOW : ACL_DENY)))
-					myexit(1);
+					exit(1);
 				break;
 			case 'L':
 				/*
@@ -1429,15 +1304,6 @@ int main(int argc, char **argv) {
 		free(tmp);
 
 		/*
-		 * Check for NTLM-to-basic settings
-		 */
-		tmp = new(AUTHSIZE);
-		CFG_DEFAULT(cf, "NTLMToBasic", tmp, AUTHSIZE);
-		if (!strcasecmp("yes", tmp))
-			basic = 1;
-		free(tmp);
-
-		/*
 		 * Setup the rest of tunnels.
 		 */
 		while ((tmp = config_pop(cf, "Tunnel"))) {
@@ -1485,7 +1351,7 @@ int main(int argc, char **argv) {
 			while (list) {
 				if (!(i=strcasecmp("Allow", list->key)) || !strcasecmp("Deny", list->key))
 					if (!acl_add(&rules, list->value, i ? ACL_DENY : ACL_ALLOW))
-						myexit(1);
+						exit(1);
 				list = list->next;
 			}
 
@@ -1538,7 +1404,6 @@ int main(int argc, char **argv) {
 			fprintf(stderr, "\t-a  ntlm | nt | lm\n"
 					"\t    Authentication parameter - combined NTLM, just LM, or just NT. Default is to,\n"
 					"\t    send both, NTLM. It is the most versatile setting and likely to work for you.\n");
-			fprintf(stderr, "\t-B  Enable NTLM-to-basic authentication.\n");
 			fprintf(stderr, "\t-c  <config_file>\n"
 					"\t    Configuration file. Other arguments can be used as well, overriding\n"
 					"\t    config file settings.\n");
@@ -1570,10 +1435,10 @@ int main(int argc, char **argv) {
 					"\t    Some proxies require correct NetBIOS hostname.\n\n");
 		}
 
-		if (!basic && !strlen(user)) {
-			syslog(LOG_ERR, "Parent proxy account username missing.\n");
+		if (!strlen(user)) {
+			syslog(LOG_ERR, "Parent proxy username missing.\n");
 		}
-		if (!basic && !strlen(password)) {
+		if (!strlen(password)) {
 			syslog(LOG_ERR, "Parent proxy account password missing.\n");
 		}
 		if (!lparents) {
@@ -1583,7 +1448,7 @@ int main(int argc, char **argv) {
 			syslog(LOG_ERR, "No proxy service ports were successfully opened.\n");
 		}
 
-		myexit(1);
+		exit(1);
 	}
 
 	/*
@@ -1600,7 +1465,7 @@ int main(int argc, char **argv) {
 			hashlm = 1;
 		} else {
 			syslog(LOG_ERR, "Unknown NTLM auth combination.\n");
-			myexit(1);
+			exit(1);
 		}
 	}
 
@@ -1608,7 +1473,7 @@ int main(int argc, char **argv) {
 	 * Set default values.
 	 */
 	if (!strlen(workstation))
-		strlcpy(workstation, "cntlm", AUTHSIZE);
+		strlcpy(workstation, user, AUTHSIZE);
 
 	/*
 	 * Ok, we are ready to rock. If daemon mode was requested,
@@ -1623,9 +1488,9 @@ int main(int argc, char **argv) {
 		i = fork();
 		if (i == -1) {
 			perror("Fork into background failed");		/* fork failed */
-			myexit(1);
+			exit(1);
 		} else if (i)
-			myexit(0);					/* parent */
+			exit(0);					/* parent */
 
 		setsid();
 		umask(0);
@@ -1657,20 +1522,20 @@ int main(int argc, char **argv) {
 	 */
 	if (strlen(uid)) {
 		if (getuid() && geteuid()) {
-			syslog(LOG_WARNING, "No root privileges; keeping identity %d:%d\n", getuid(), getgid());
+			syslog(LOG_ERR, "Not running with root privileges; cannot change uid\n");
 		} else {
 			if (isdigit(uid[0])) {
 				nuid = atoi(uid);
 				ngid = nuid;
 				if (nuid <= 0) {
 					syslog(LOG_ERR, "Numerical uid parameter invalid\n");
-					myexit(1);
+					exit(1);
 				}
 			} else {
 				pw = getpwnam(uid);
 				if (!pw || !pw->pw_uid) {
 					syslog(LOG_ERR, "Username uid parameter invalid\n");
-					myexit(1);
+					exit(1);
 				}
 				nuid = pw->pw_uid;
 				ngid = pw->pw_gid;
@@ -1680,7 +1545,7 @@ int main(int argc, char **argv) {
 			syslog(LOG_INFO, "Changing uid:gid to %d:%d - %s\n", nuid, ngid, strerror(errno));
 			if (i) {
 				syslog(LOG_ERR, "Terminating\n");
-				myexit(1);
+				exit(1);
 			}
 		}
 	}
@@ -1694,7 +1559,7 @@ int main(int argc, char **argv) {
 		cd = open(pidfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (cd < 0) {
 			syslog(LOG_ERR, "Error creating a new PID file\n");
-			myexit(1);
+			exit(1);
 		}
 
 		tmp = new(50);
