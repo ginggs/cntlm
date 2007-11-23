@@ -409,7 +409,8 @@ int authenticate(int sd, rr_data_t request, struct auth_s *creds, int *closed) {
 	auth = dup_rr_data(request);
 
 	/*
-	 * If the request is CONNECT, we have to keep it unmodified
+	 * If the request is CONNECT, we keep it unmodified as there are no possible data
+	 * transfers until auth is fully negotiated. All other requests are changed to HEAD.
 	 */
 	if (!CONNECT(request)) {
 		free(auth->method);
@@ -431,17 +432,13 @@ int authenticate(int sd, rr_data_t request, struct auth_s *creds, int *closed) {
 	free_rr_data(auth);
 	auth = new_rr_data();
 
-	if (debug) {
+	if (debug)
 		printf("Reading auth response...\n");
-	}
 
 	if (!headers_recv(sd, auth)) {
 		rc = 0;
 		goto bailout;
 	}
-
-	if (debug)
-		hlist_dump(auth->headers);
 
 	tmp = hlist_get(auth->headers, "Content-Length");
 	if (tmp && (len = atoi(tmp))) {
@@ -450,9 +447,6 @@ int authenticate(int sd, rr_data_t request, struct auth_s *creds, int *closed) {
 		data_drop(sd, len);
 	}
 
-	/*
-	 * Should auth continue?
-	 */
 	if (auth->code == 407) {
 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
 		if (tmp) {
@@ -480,24 +474,17 @@ int authenticate(int sd, rr_data_t request, struct auth_s *creds, int *closed) {
 
 			free(challenge);
 		} else {
+			if (debug)
+				hlist_dump(auth->headers);
 			syslog(LOG_WARNING, "No Proxy-Authenticate received! NTLM not supported?\n");
 		}
 	} else if (auth->code >= 500 && auth->code <= 599) {
-		/*
-		 * Proxy didn't like the request, close connection and don't try again.
-		 */
 		syslog(LOG_WARNING, "The request was denied!\n");
 
 		close(sd);
 		rc = 500;
 
 		goto bailout;
-	} else {
-		/*
-		 * No auth was neccessary, let the caller make the request again.
-		 */
-		if (closed)
-			*closed = 1;
 	}
 
 	/*
@@ -505,9 +492,7 @@ int authenticate(int sd, rr_data_t request, struct auth_s *creds, int *closed) {
 	 * at all or there was some problem. If so, let caller know that it should
 	 * reconnect!
 	 */
-	if (closed && hlist_subcmp(auth->headers, "Proxy-Connection", "close")) {
-		if (debug)
-			printf("Proxy signals it's closing the connection.\n");
+	if (closed && !hlist_subcmp(auth->headers, "Proxy-Connection", "keep-alive")) {
 		*closed = 1;
 	}
 
@@ -1122,7 +1107,7 @@ void *proxy_thread(void *client) {
 
 				if (!i || closed || so_closed(sd)) {
 					if (debug)
-						printf("Proxy closed connection (i=%d, closed=%d, so_closed=%d). Reconnecting...\n", i, closed, so_closed(sd));
+						printf("Proxy closed connection. Reconnecting...\n");
 					close(sd);
 					sd = proxy_connect();
 					if (sd <= 0) {
@@ -2501,11 +2486,6 @@ int main(int argc, char **argv) {
 	signal(SIGINT, &sighandler);
 	signal(SIGTERM, &sighandler);
 	signal(SIGHUP, &sighandler);
-
-	/*
-	 * Initialize the random number generator
-	 */
-	srandom(time(NULL));
 
 	if (precache) {
 		pthread_attr_init(&pattr);

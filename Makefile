@@ -8,12 +8,10 @@ MANDIR=/usr/local/man
 
 #
 # Careful now...
-# __BSD_VISIBLE is for FreeBSD AF_* constants
-# _ALL_SOURCE is for AIX 5.3 LOG_PERROR constant
 #
 CC=gcc
 OBJS=utils.o ntlm.o xcrypt.o config.o socket.o acl.o auth.o http.o proxy.o 
-CFLAGS=$(FLAGS) -std=c99 -Wall -pedantic -O3 -D__BSD_VISIBLE -D_ALL_SOURCE -D_XOPEN_SOURCE=600 -D_POSIX_C_SOURCE=200112 -D_ISOC99_SOURCE -D_REENTRANT -DVERSION=\"`cat VERSION`\"
+CFLAGS=$(FLAGS) -std=c99 -Wall -pedantic -O3 -D__BSD_VISIBLE -D_POSIX_C_SOURCE=200112 -D_ISOC99_SOURCE -D_REENTRANT -DVERSION=\"`cat VERSION`\"
 LDFLAGS=-lpthread
 NAME=cntlm
 VER=`cat VERSION`
@@ -83,8 +81,7 @@ uninstall:
 clean:
 	@rm -f *.o cntlm cntlm.exe configure-stamp build-stamp config/config.h 2>/dev/null
 	@rm -f cntlm-install win32/cyg* win32/cntlm* 2>/dev/null
-	@rm -f config/endian config/gethostname config/strdup config/socklen_t config/*.exe
-	@if [ -h Makefile ]; then rm -f Makefile; mv Makefile.gcc Makefile; fi
+	@rm -f config/endian config/gethostname config/strdup config/*.exe
 
 cleanp: clean
 	@rm -f *.deb *.tgz *.tar.gz *.rpm *.o tags cntlm pid massif* callgrind* 2>/dev/null
