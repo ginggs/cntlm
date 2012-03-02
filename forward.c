@@ -64,9 +64,7 @@ int proxy_connect(struct auth_s *credentials) {
 	pthread_mutex_unlock(&parent_mtx);
 
 	do {
-		pthread_mutex_lock(&parent_mtx);
 		aux = (proxy_t *)plist_get(parent_list, parent_curr);
-		pthread_mutex_unlock(&parent_mtx);
 		if (aux->resolved == 0) {
 			if (debug)
 				syslog(LOG_INFO, "Resolving proxy %s...\n", aux->hostname);
@@ -341,9 +339,7 @@ beginning:
 
 	if (debug) {
 		printf("Thread processing%s...\n", retry ? " (retry)" : "");
-		pthread_mutex_lock(&connection_mtx);
 		plist_dump(connection_list);
-		pthread_mutex_unlock(&connection_mtx);
 	}
 
 	/*

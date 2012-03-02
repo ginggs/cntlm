@@ -223,7 +223,7 @@ void tunnel_add(plist_t *list, char *spec, int gateway) {
 	spec = strdup(spec);
 	len = strlen(spec);
 	field[0] = spec;
-	for (count = 1, i = 0; count < 4 && i < len; ++i)
+	for (count = 1, i = 0; i < len; ++i)
 		if (spec[i] == ':') {
 			spec[i] = 0;
 			field[count++] = spec+i+1;
@@ -949,15 +949,14 @@ int main(int argc, char **argv) {
 #ifdef SYSCONFDIR
 	if (!cf) {
 #ifdef __CYGWIN__
-		tmp = getenv("PROGRAMFILES(X86)");
-		if (tmp == NULL || strlen(tmp) == 0)
-			tmp = getenv("PROGRAMFILES");
-		if (tmp == NULL)
+		tmp = getenv("PROGRAMFILES");
+		if (tmp == NULL) {
 			tmp = "C:\\Program Files";
+		}
 
 		head = new(MINIBUF_SIZE);
 		strlcpy(head, tmp, MINIBUF_SIZE);
-		strlcat(head, "\\Cntlm\\cntlm.ini", MINIBUF_SIZE);
+		strlcat(head, "\\cntlm\\cntlm.ini", MINIBUF_SIZE);
 		cf = config_open(head);
 #else
 		cf = config_open(SYSCONFDIR "/cntlm.conf");
@@ -1204,12 +1203,8 @@ int main(int argc, char **argv) {
 		tcsetattr(0, TCSADRAIN, &termnew);
 		tmp = fgets(cpassword, MINIBUF_SIZE, stdin);
 		tcsetattr(0, TCSADRAIN, &termold);
-		i = strlen(cpassword) - 1;
-		if (cpassword[i] == '\n') {
-			cpassword[i] = 0;
-			if (cpassword[i - 1] == '\r')
-				cpassword[i - 1] = 0;
-		}
+		i = strlen(cpassword)-1;
+		trimr(cpassword);
 		printf("\n");
 	}
 
